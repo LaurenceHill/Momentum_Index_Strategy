@@ -2,150 +2,134 @@ import streamlit as st
 import pandas as pd
 import math
 from pathlib import Path
+import matplotlib.pyplot as plt
+import seaborn as sns
+import pandas as pd
+import sendgrid
+from sendgrid.helpers.mail import Mail, Email, To, Content, Attachment
+import base64
+from io import BytesIO
+import os
+import yfinance as yf
+import requests
+from datetime import date
+import numpy as np
+import statistics
+from scipy.stats import norm
+import sys
+import contextlib
+from matplotlib.colors import PowerNorm
+from matplotlib.colors import LinearSegmentedColormap
+from mpl_toolkits.axes_grid1.inset_locator import inset_axes, mark_inset
+
+# https://pypi.org/project/QuantStats/
+import quantstats as qs
+qs.extend_pandas()
+
+from hmmlearn import hmm
+import matplotlib.gridspec as gridspec
 
 # Set the title and favicon that appear in the Browser's tab bar.
 st.set_page_config(
-    page_title='GDP dashboard',
+    page_title='Momentum Index Strategy',
     page_icon=':earth_americas:', # This is an emoji shortcode. Could be a URL too.
 )
 
 # -----------------------------------------------------------------------------
-# Declare some useful functions.
 
-@st.cache_data
-def get_gdp_data():
-    """Grab GDP data from a CSV file.
+# Streamlit app
+def main():
+    st.title("Analysis for Stock Ticker")
 
-    This uses caching to avoid having to read the file every time. If we were
-    reading from an HTTP endpoint instead of a file, it's a good idea to set
-    a maximum age to the cache with the TTL argument: @st.cache_data(ttl='1d')
-    """
+    # User inputs
+    ticker = st.text_input("Enter Ticker Symbol", "TECL")
+    # SLOW = st.slider("Slow Rolling Average (in days)", 200, 300, 252)
+    # FAST = st.slider("Fast Rolling Average (in days)", 20, 100, 21)
+    #years_reviewed = st.slider("Years Reviewed", 5, 20, 8)
+    SLOW = 252
+    FAST = 21
+    years_reviewed = 8
 
-    # Instead of a CSV on disk, you could read from an HTTP endpoint here too.
-    DATA_FILENAME = Path(__file__).parent/'data/gdp_data.csv'
-    raw_gdp_df = pd.read_csv(DATA_FILENAME)
+    # Step 1: Download data
+    today_date = date.today()
+    df = yf.download(ticker, start='1980-01-01', end=today_date)
+    df['Change(%)'] = (df['Close'].diff(1) / df['Close'].shift(1)) * 100
+    df = df.reset_index()
+    df['Date'] = pd.to_datetime(df['Date']).dt.strftime('%Y-%m-%d %H:%M:%S')
+    df.rename(columns={'Date': 'date', 'Open': 'open', 'High': 'high', 'Low': 'low', 'Close': 'close',
+                       'Volume': 'volume', 'Adj Close': 'adj_close'}, inplace=True)
+    df = df.sort_values('date')
+    
+    # Step 2: Data Processing
+    df_adj = df.copy()
+    df_adj['Rolling Change Sum - SLOW'] = df_adj['Change(%)'].rolling(window=SLOW).sum()
+    df_adj['Rolling Change Sum - FAST'] = df_adj['Change(%)'].rolling(window=FAST).sum()
+    df_adj = df_adj.dropna()
 
-    MIN_YEAR = 1960
-    MAX_YEAR = 2022
+    # Step 3: Hidden Markov Model for market regimes
+    dZ = df_adj[['date', 'Change(%)', 'close']]
+    dZ['slow_rolling_avg'] = dZ['Change(%)'].rolling(window=SLOW).mean()
+    dZ['fast_rolling_avg'] = dZ['Change(%)'].rolling(window=FAST).mean()
+    dZ['price'] = (1 + dZ['Change(%)'] / 100).cumprod()
+    dZ = dZ.dropna()
 
-    # The data above has columns like:
-    # - Country Name
-    # - Country Code
-    # - [Stuff I don't care about]
-    # - GDP for 1960
-    # - GDP for 1961
-    # - GDP for 1962
-    # - ...
-    # - GDP for 2022
-    #
-    # ...but I want this instead:
-    # - Country Name
-    # - Country Code
-    # - Year
-    # - GDP
-    #
-    # So let's pivot all those year-columns into two: Year and GDP
-    gdp_df = raw_gdp_df.melt(
-        ['Country Code'],
-        [str(x) for x in range(MIN_YEAR, MAX_YEAR + 1)],
-        'Year',
-        'GDP',
-    )
+    # Apply HMM to predict market regimes
+    X = dZ[['slow_rolling_avg', 'fast_rolling_avg']].values
+    model = hmm.GaussianHMM(n_components=4, covariance_type="full", n_iter=1000)
+    model.fit(X)
+    hidden_states = model.predict(X)
 
-    # Convert years from string to integers
-    gdp_df['Year'] = pd.to_numeric(gdp_df['Year'])
+    # Add hidden states to the dataframe
+    dZ['hidden_state'] = hidden_states
 
-    return gdp_df
+    # Plot
+    st.subheader("Market Regimes")
+    fig, ax = plt.subplots(figsize=(12, 6))
+    sns.lineplot(x=dZ['date'], y='Change(%)', hue='hidden_state', data=dZ, palette='viridis', ax=ax)
+    ax.set_title("Change(%) by Hidden State")
+    ax.set_xlabel('Date')
+    ax.set_ylabel('Change(%)')
+    st.pyplot(fig)
 
-gdp_df = get_gdp_data()
+    # Plot Rolling Averages
+    st.subheader("Slow Rolling Average by Hidden State")
+    fig, ax = plt.subplots(figsize=(12, 6))
+    sns.lineplot(x=dZ['date'], y='slow_rolling_avg', hue='hidden_state', data=dZ, palette='viridis', ax=ax)
+    ax.set_xlabel('Date')
+    ax.set_ylabel('Slow Rolling Average')
+    st.pyplot(fig)
+     # Plot Rolling Averages
+    st.subheader("Fast Rolling Average by Hidden State")
+    fig, ax = plt.subplots(figsize=(12, 6))
+    sns.lineplot(x=dZ['date'], y='fast_rolling_avg', hue='hidden_state', data=dZ, palette='viridis', ax=ax)
+    ax.set_xlabel('Date')
+    ax.set_ylabel('Fast Rolling Average')
+    st.pyplot(fig)
 
-# -----------------------------------------------------------------------------
-# Draw the actual page
+    st.subheader("Rolling Averages by Hidden State")
+    fig, ax = plt.subplots(figsize=(12, 6))
+    sns.lineplot(x=dZ['date'], y='price', hue='hidden_state', data=dZ, palette='viridis', ax=ax)
+    ax.set_xlabel('Date')
+    ax.set_ylabel('Rolling Average')
+    st.pyplot(fig)
 
-# Set the title that appears at the top of the page.
-'''
-# :earth_americas: GDP dashboard
+    st.subheader("Rolling Averages by Hidden State (Latest)")
+    fig, ax = plt.subplots(figsize=(12, 6))
+    sns.lineplot(x=dZ['date'].tail(100), y='price', hue='hidden_state', data=dZ.tail(100), palette='viridis', ax=ax)
+    ax.set_xlabel('Date')
+    ax.set_ylabel('Latest')
+    st.pyplot(fig)
 
-Browse GDP data from the [World Bank Open Data](https://data.worldbank.org/) website. As you'll
-notice, the data only goes to 2022 right now, and datapoints for certain years are often missing.
-But it's otherwise a great (and did I mention _free_?) source of data.
-'''
+    
 
-# Add some spacing
-''
-''
+    # Show latest data in table
+    # st.subheader(f"Latest 100 data points")
+    # st.dataframe(dZ.tail(100))  # Displaying the last 100 rows
 
-min_value = gdp_df['Year'].min()
-max_value = gdp_df['Year'].max()
+    # Save the chart as an image
+    # fig.savefig('daily_chart.png')
+    # st.download_button("Download Chart as PNG", data=open('daily_chart.png', 'rb'), file_name="daily_chart.png", mime="image/png")
 
-from_year, to_year = st.slider(
-    'Which years are you interested in?',
-    min_value=min_value,
-    max_value=max_value,
-    value=[min_value, max_value])
+if __name__ == "__main__":
+    main()
 
-countries = gdp_df['Country Code'].unique()
-
-if not len(countries):
-    st.warning("Select at least one country")
-
-selected_countries = st.multiselect(
-    'Which countries would you like to view?',
-    countries,
-    ['DEU', 'FRA', 'GBR', 'BRA', 'MEX', 'JPN'])
-
-''
-''
-''
-
-# Filter the data
-filtered_gdp_df = gdp_df[
-    (gdp_df['Country Code'].isin(selected_countries))
-    & (gdp_df['Year'] <= to_year)
-    & (from_year <= gdp_df['Year'])
-]
-
-st.header('GDP over time', divider='gray')
-
-''
-
-st.line_chart(
-    filtered_gdp_df,
-    x='Year',
-    y='GDP',
-    color='Country Code',
-)
-
-''
-''
-
-
-first_year = gdp_df[gdp_df['Year'] == from_year]
-last_year = gdp_df[gdp_df['Year'] == to_year]
-
-st.header(f'GDP in {to_year}', divider='gray')
-
-''
-
-cols = st.columns(4)
-
-for i, country in enumerate(selected_countries):
-    col = cols[i % len(cols)]
-
-    with col:
-        first_gdp = first_year[first_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-        last_gdp = last_year[last_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-
-        if math.isnan(first_gdp):
-            growth = 'n/a'
-            delta_color = 'off'
-        else:
-            growth = f'{last_gdp / first_gdp:,.2f}x'
-            delta_color = 'normal'
-
-        st.metric(
-            label=f'{country} GDP',
-            value=f'{last_gdp:,.0f}B',
-            delta=growth,
-            delta_color=delta_color
-        )
