@@ -10,3 +10,4 @@ scipy
 statistics  # (This is part of the Python standard library but harmless to include.)
 quantstats
 hmmlearn
+IPython
