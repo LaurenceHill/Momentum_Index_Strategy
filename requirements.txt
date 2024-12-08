@@ -1,18 +1,12 @@
 streamlit
 pandas
-pathlib
 matplotlib
 seaborn
 sendgrid
-sendgrid
-base64
-io 
-os
 yfinance
 requests
-datetime
 numpy
-statistics
 scipy
-sys
-contextlib
+statistics  # (This is part of the Python standard library but harmless to include.)
+quantstats
+hmmlearn
